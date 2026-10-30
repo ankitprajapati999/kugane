@@ -6,6 +6,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "faster-whisper>=1.2.1",
+    "sounddevice>=0.4.7",
+    "numpy>=1.26.0",
+    "colorama>=0.4.6",
 ]
 
 [tool.uv]
