@@ -1,14 +1,14 @@
 [project]
 name = "kugane"
 version = "0.1.0"
-description = "Local voice assistant experiments"
+description = "Kugane — local AI desktop assistant"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "faster-whisper>=1.2.1",
-    "sounddevice>=0.4.7",
-    "numpy>=1.26.0",
-    "colorama>=0.4.6",
+    "PyQt6>=6.7.0",
+    "google-genai>=1.0.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0.4",
 ]
 
 [tool.uv]
