@@ -1,821 +1,124 @@
 # -*- coding: utf-8 -*-
 """
-ui/island_window.py — Kugane Dynamic Island Assistant (Pure Text UI & Advanced Animations).
+ui/island_window.py — Kugane Dynamic Island Window Shell.
 
-States
-------
-  State 01 — Idle / Compact     (● KUGANE |||) - Calm floating capsule with pulsing dot
-  State 02 — Thinking / Active  (● KUGANE |||) - Active animated waveform and glowing accent
-  State 03 — Expanded Assistant - Dual-bubble: compact pill on top + conversation card below
+Coordinates:
+  - Top-bezel notch silhouette, physical-inch sizing, and expand/collapse physics
+  - Subtle grayish hover backlight on BOTH compact and expanded windows
+  - Edge/corner resizing and fullscreen toggle on the expanded pill
+  - Top-edge horizontal dragging, Esc/arrow key handling, and focus-loss collapse
 """
 from __future__ import annotations
 
 from typing import Callable, Optional
 
 from PyQt6.QtCore import (
-    Qt, QRect, QTimer, QPropertyAnimation, QEasingCurve,
-    QPoint, pyqtSignal, QSize, QParallelAnimationGroup, QEvent,
+    QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRect, QRectF, Qt,
+    pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QFont, QColor, QPainter, QPainterPath, QPen, QBrush,
-    QKeyEvent, QMouseEvent, QEnterEvent, QLinearGradient,
+    QBrush, QColor, QEnterEvent, QIcon, QKeyEvent, QMouseEvent, QPainter, QPen,
 )
-from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
-    QLineEdit, QScrollArea, QSizePolicy, QPushButton,
-    QApplication, QGraphicsOpacityEffect,
+from PyQt6.QtWidgets import QApplication, QVBoxLayout, QWidget
+
+from ui.compact_view import CompactCapsuleView
+from ui.conversation_card import ConversationCardView
+from ui.messages import AssistantMessageItem, UserMessageItem
+from ui.theme import (
+    DIMENSIONS, LOGO_PATH, NOTCH_BG, NOTCH_BORDER, NOTCH_BORDER_HOVER,
+    POSITION, build_notch_paths, parse_color,
+)
+from ui.widgets import (
+    AttachFileButton, KuganeLogoWidget, PulseDotWidget, ScreenVisionButton,
+    WaveformWidget,
 )
 
-# ── Load user-tweakable config from YAML ──────────────────────────────────────
-from config.ui_config import load_ui_config as _load_ui_config
+__all__ = [
+    "DynamicIslandWindow",
+    "CompactCapsuleView",
+    "ConversationCardView",
+    "UserMessageItem",
+    "AssistantMessageItem",
+    "KuganeLogoWidget",
+    "PulseDotWidget",
+    "WaveformWidget",
+    "AttachFileButton",
+    "ScreenVisionButton",
+]
 
-_CFG = _load_ui_config()
-_C = _CFG["colors"]
-_D = _CFG["dimensions"]
-_P = _CFG["position"]
-_F = _CFG["fonts"]
 
-# ══════════════════════════════════════════════════════════════════════════════
-# DESIGN SYSTEM TOKENS (Loaded from ui_config.yaml with built-in defaults)
-# ══════════════════════════════════════════════════════════════════════════════
-BG_SURFACE       = "#11141E"
-BG_CAPSULE       = "#252B3A"
-BG_CAPSULE_HOVER = "#2A3142"
-BG_USER_BUBBLE   = "#293F69"
-BG_AI_BUBBLE     = "#202634"
-BG_COMPOSER      = "#1F2533"
-BORDER_PANEL     = "#252B3A"
-BORDER_CAPSULE   = "#30394A"
-BORDER_HOVER     = "#44526B"
-BORDER_COMPOSER  = "#2A3346"
-DIVIDER_LINE     = "#252B3A"
-
-ACCENT_BLUE      = _C.get("accent_blue", "#7892FF")
-ACCENT_BLUE_HOV  = _C.get("accent_blue_hover", "#8EA5FF")
-ACCENT_GREEN     = _C.get("accent_green", "#58D6A0")
-ACCENT_AMBER     = _C.get("accent_amber", "#FFB300")
-ACCENT_RED       = _C.get("accent_red", "#FF4444")
-
-TEXT_PRIMARY     = _C.get("text_primary", "#E5E9F2")
-TEXT_SECONDARY   = _C.get("text_secondary", "#9BAAC5")
-TEXT_MUTED       = _C.get("text_muted", "#6B7B99")
-
-FONT_FAMILY_SANS = _F.get("family", "JetBrainsMono Nerd Font")
-FONT_FAMILY_MONO = _F.get("family", "JetBrainsMono Nerd Font")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# COMPONENT: PulseDotWidget (Gentle breathing dot indicator)
-# ══════════════════════════════════════════════════════════════════════════════
-class PulseDotWidget(QWidget):
-    """Draws a smooth breathing / pulsing circular status indicator."""
-
-    def __init__(self, color: str = ACCENT_BLUE, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(12, 12)
-        self._color = QColor(color)
-        self._alpha = 230
-        self._dir = -1
-        self._pulsing = True
-
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
-        self._timer.start(40)
-
-    def set_color(self, hex_color: str, pulse: bool = True):
-        self._color = QColor(hex_color)
-        self._pulsing = pulse
-        if not pulse:
-            self._alpha = 255
-        self.update()
-
-    def _tick(self):
-        if not self._pulsing:
-            return
-        self._alpha += self._dir * 4
-        if self._alpha <= 140:
-            self._alpha = 140
-            self._dir = 1
-        elif self._alpha >= 255:
-            self._alpha = 255
-            self._dir = -1
-        self.update()
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        # Subtle halo glow
-        glow_color = QColor(self._color)
-        glow_color.setAlpha(int(self._alpha * 0.25))
-        p.setBrush(QBrush(glow_color))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawEllipse(1, 1, 10, 10)
-
-        # Core dot
-        core_color = QColor(self._color)
-        core_color.setAlpha(self._alpha)
-        p.setBrush(QBrush(core_color))
-        p.drawEllipse(2, 2, 8, 8)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# COMPONENT: WaveformWidget (5 animated / static vertical bars)
-# ══════════════════════════════════════════════════════════════════════════════
-class WaveformWidget(QWidget):
-    """Draws the 5 vertical waveform bars seen in State 01 with dynamic animation."""
-
-    def __init__(self, color: str = ACCENT_BLUE, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(22, 18)
-        self._color = QColor(color)
-        self._bars = [4, 8, 14, 8, 4]  # Bar heights in pixels
-        self._active = False
-        self._phase = 0
-
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._animate_tick)
-
-    def set_color(self, hex_color: str):
-        self._color = QColor(hex_color)
-        self.update()
-
-    def set_active(self, active: bool):
-        self._active = active
-        if active:
-            if not self._timer.isActive():
-                self._timer.start(75)
-        else:
-            self._timer.stop()
-            self._bars = [4, 8, 14, 8, 4]
-            self.update()
-
-    def _animate_tick(self):
-        self._phase = (self._phase + 1) % 6
-        presets = [
-            [4, 8, 14, 8, 4],
-            [5, 11, 16, 10, 5],
-            [6, 14, 12, 13, 6],
-            [5, 12, 16, 9, 4],
-            [4, 9, 13, 11, 5],
-            [3, 7, 10, 7, 3],
-        ]
-        self._bars = presets[self._phase]
-        self.update()
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setBrush(QBrush(self._color))
-        p.setPen(Qt.PenStyle.NoPen)
-
-        x_start = 2
-        cy = self.height() / 2.0
-
-        for h in self._bars:
-            y = cy - h / 2.0
-            p.drawRoundedRect(QRect(int(x_start), int(y), 2, int(h)), 1, 1)
-            x_start += 4
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# COMPONENT: SparkleIconWidget (AI prompt glyph for composer)
-# ══════════════════════════════════════════════════════════════════════════════
-class SparkleIconWidget(QWidget):
-    """Draws a clean, futuristic 4-point AI spark symbol."""
-
-    def __init__(self, color: str = TEXT_SECONDARY, size: int = 16, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(size, size)
-        self._color = QColor(color)
-
-    def set_color(self, hex_color: str):
-        self._color = QColor(hex_color)
-        self.update()
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setBrush(QBrush(self._color))
-        p.setPen(Qt.PenStyle.NoPen)
-
-        w, h = self.width(), self.height()
-        cx, cy = w / 2.0, h / 2.0
-
-        # Draw 4-point star path
-        path = QPainterPath()
-        path.moveTo(cx, cy - 6)
-        path.quadTo(cx, cy, cx + 6, cy)
-        path.quadTo(cx, cy, cx, cy + 6)
-        path.quadTo(cx, cy, cx - 6, cy)
-        path.quadTo(cx, cy, cx, cy - 6)
-        p.drawPath(path)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# COMPONENT: Kugane Orbit Logo Badge (Header)
-# ══════════════════════════════════════════════════════════════════════════════
-class KuganeLogoBadge(QWidget):
-    """Draws the rounded square logo badge with Kugane's orbital assistant mark."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(34, 34)
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        grad = QLinearGradient(0, 0, 0, self.height())
-        grad.setColorAt(0.0, QColor(34, 42, 60))
-        grad.setColorAt(1.0, QColor(24, 30, 43))
-
-        p.setBrush(QBrush(grad))
-        p.setPen(QPen(QColor(120, 146, 255, 45), 1))
-        p.drawRoundedRect(0, 0, self.width(), self.height(), 8, 8)
-
-        # Orbital assistant swirl icon in #7892FF
-        pen = QPen(QColor(ACCENT_BLUE), 1.75, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
-        p.setPen(pen)
-        p.setBrush(Qt.BrushStyle.NoBrush)
-
-        cx, cy = self.width() / 2.0, self.height() / 2.0
-
-        # Outer orbital arc
-        p.drawArc(int(cx - 9), int(cy - 9), 18, 18, 45 * 16, 260 * 16)
-        # Inner orbital arc
-        p.drawArc(int(cx - 5), int(cy - 5), 10, 10, 220 * 16, 250 * 16)
-        # Center core dot
-        p.setBrush(QBrush(QColor(ACCENT_BLUE)))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawEllipse(int(cx - 1.5), int(cy - 1.5), 3, 3)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# COMPACT VIEW (Capsule for Idle and Active states)
-# ══════════════════════════════════════════════════════════════════════════════
-class CompactCapsuleView(QFrame):
-    """The floating capsule pill with hover glow and dynamic state transitions."""
-
-    clicked = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("CompactCapsule")
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._is_hovered = False
-
-        self._layout = QHBoxLayout(self)
-        self._layout.setContentsMargins(16, 0, 16, 0)
-        self._layout.setSpacing(10)
-
-        # Left status indicator: Pulsing dot
-        self._dot = PulseDotWidget(ACCENT_BLUE)
-
-        # Center text label
-        self._label = QLabel("KUGANE")
-        self._label.setFont(QFont(FONT_FAMILY_MONO, 10, QFont.Weight.Bold))
-        self._label.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent; border: none; letter-spacing: 1px;")
-
-        # Right waveform indicator
-        self._waveform = WaveformWidget(ACCENT_BLUE)
-
-        self._layout.addWidget(self._dot, alignment=Qt.AlignmentFlag.AlignVCenter)
-        self._layout.addWidget(self._label, alignment=Qt.AlignmentFlag.AlignVCenter)
-        self._layout.addStretch()
-        self._layout.addWidget(self._waveform, alignment=Qt.AlignmentFlag.AlignVCenter)
-
-    def set_idle_state(self):
-        """Idle: Pulsing blue dot + KUGANE + Calm blue waveform."""
-        self._dot.set_color(ACCENT_BLUE, pulse=True)
-        self._label.setText("KUGANE")
-        self._label.setFont(QFont(FONT_FAMILY_MONO, 10, QFont.Weight.Bold))
-        self._label.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent; border: none; letter-spacing: 1px;")
-        self._waveform.set_color(ACCENT_BLUE)
-        self._waveform.set_active(False)
-
-    def set_thinking_state(self):
-        """Thinking: Bright blue dot + Thinking + Active pulsing waveform."""
-        self._dot.set_color(ACCENT_BLUE, pulse=True)
-        self._label.setText("Thinking")
-        self._label.setFont(QFont(FONT_FAMILY_MONO, 10, QFont.Weight.Bold))
-        self._label.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent; border: none;")
-        self._waveform.set_color(ACCENT_BLUE)
-        self._waveform.set_active(True)
-
-    def set_loading_state(self, message: str = "Loading..."):
-        self._dot.set_color(ACCENT_AMBER, pulse=True)
-        self._label.setText(message)
-        self._label.setFont(QFont(FONT_FAMILY_MONO, 9, QFont.Weight.Bold))
-        self._label.setStyleSheet(f"color: {ACCENT_AMBER}; background: transparent; border: none;")
-        self._waveform.set_color(ACCENT_AMBER)
-        self._waveform.set_active(False)
-
-    def set_error_state(self, message: str = "Error"):
-        self._dot.set_color(ACCENT_RED, pulse=False)
-        self._label.setText(message)
-        self._label.setFont(QFont(FONT_FAMILY_MONO, 9, QFont.Weight.Bold))
-        self._label.setStyleSheet(f"color: {ACCENT_RED}; background: transparent; border: none;")
-        self._waveform.set_color(ACCENT_RED)
-        self._waveform.set_active(False)
-
-    def enterEvent(self, event: QEnterEvent):
-        self._is_hovered = True
-        self.update()
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):
-        self._is_hovered = False
-        self.update()
-        super().leaveEvent(event)
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        radius = self.height() / 2.0
-        grad = QLinearGradient(0, 0, 0, self.height())
-        if self._is_hovered:
-            grad.setColorAt(0.0, QColor(48, 59, 86))
-            grad.setColorAt(1.0, QColor(31, 39, 60))
-            border_pen = QPen(QColor(142, 165, 255, 80), 1.0)
-        else:
-            grad.setColorAt(0.0, QColor(38, 46, 68))
-            grad.setColorAt(1.0, QColor(24, 30, 46))
-            border_pen = QPen(QColor(120, 146, 255, 40), 1.0)
-
-        p.setBrush(QBrush(grad))
-        p.setPen(border_pen)
-        p.drawRoundedRect(0, 0, self.width(), self.height(), radius, radius)
-
-    def mousePressEvent(self, event: QMouseEvent):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MESSAGE BUBBLE WIDGETS (Crisp, High-Contrast Text Rendering)
-# ══════════════════════════════════════════════════════════════════════════════
-class UserMessageItem(QWidget):
-    """User message bubble: Right-aligned, rich blue gradient, radius 16px."""
-
-    def __init__(self, text: str, parent=None):
-        super().__init__(parent)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 3, 6, 3)
-        layout.addStretch()
-
-        bubble = QFrame()
-        bubble.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #314E85, stop:1 #243860);
-                border-radius: 16px;
-                border: 1px solid rgba(120, 146, 255, 0.25);
-            }
-        """)
-        b_layout = QVBoxLayout(bubble)
-        b_layout.setContentsMargins(16, 10, 16, 10)
-
-        font = QFont(FONT_FAMILY_MONO, 11, QFont.Weight.Bold)
-        label = QLabel(text)
-        label.setFont(font)
-        label.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent; border: none;")
-        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-
-        fm = label.fontMetrics()
-        lines = text.split('\n')
-        max_line_w = max(fm.horizontalAdvance(l) for l in lines) if lines else 0
-
-        max_content_w = 360
-        if max_line_w + 10 <= max_content_w:
-            label.setWordWrap(False)
-            bubble.setFixedWidth(max_line_w + 10 + 32)
-        else:
-            label.setWordWrap(True)
-            bubble.setFixedWidth(max_content_w + 32)
-
-        b_layout.addWidget(label)
-        layout.addWidget(bubble)
-
-
-class AssistantMessageItem(QWidget):
-    """Assistant message: Left-aligned, 'KUGANE' header in blue, smooth gradient bubble, markdown support."""
-
-    def __init__(self, text: str, parent=None):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 4, 6, 4)
-        layout.setSpacing(6)
-
-        header = QLabel("KUGANE")
-        header.setFont(QFont(FONT_FAMILY_MONO, 9, QFont.Weight.Bold))
-        header.setStyleSheet(f"color: {ACCENT_BLUE}; background: transparent; border: none; letter-spacing: 0.5px;")
-        layout.addWidget(header)
-
-        bubble = QFrame()
-        bubble.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1C2333, stop:1 #151A26);
-                border-radius: 16px;
-                border: 1px solid rgba(120, 146, 255, 0.15);
-            }
-        """)
-        b_layout = QVBoxLayout(bubble)
-        b_layout.setContentsMargins(16, 12, 16, 12)
-
-        font = QFont(FONT_FAMILY_MONO, 10, QFont.Weight.Bold)
-        label = QLabel()
-        label.setFont(font)
-        label.setTextFormat(Qt.TextFormat.MarkdownText)
-        label.setWordWrap(True)
-        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.LinksAccessibleByMouse)
-        label.setOpenExternalLinks(True)
-        label.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent; border: none;")
-        label.setText(text)
-
-        fm = label.fontMetrics()
-        lines = text.split('\n')
-        max_line_w = max(fm.horizontalAdvance(l) for l in lines) if lines else 0
-
-        max_content_w = 380
-        if '\n' in text or len(text) > 80:
-            bubble.setFixedWidth(max_content_w + 32)
-        elif max_line_w + 10 <= max_content_w:
-            bubble.setFixedWidth(max(max_line_w + 10 + 32, 160))
-        else:
-            bubble.setFixedWidth(max_content_w + 32)
-
-        b_layout.addWidget(label)
-
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(bubble)
-        row.addStretch()
-
-        layout.addLayout(row)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# CONVERSATION CARD (Separate lower bubble — messages, thinking, composer)
-# ══════════════════════════════════════════════════════════════════════════════
-class ConversationCardView(QFrame):
-    """The conversation card panel that sits below the compact pill with a visual gap."""
-
-    close_requested = pyqtSignal()
-    minimize_requested = pyqtSignal()
-    message_sent = pyqtSignal(str)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("ConversationCard")
-
-        main_vbox = QVBoxLayout(self)
-        main_vbox.setContentsMargins(20, 14, 20, 16)
-        main_vbox.setSpacing(10)
-
-        # ── Thin top bar: logo, Kugane title, minimize, close ─────────────────
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.setSpacing(10)
-
-        self._logo_badge = KuganeLogoBadge()
-        title_lbl = QLabel("Kugane")
-        title_lbl.setFont(QFont(FONT_FAMILY_SANS, 12, QFont.Weight.Bold))
-        title_lbl.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent; border: none;")
-
-        btn_box = QHBoxLayout()
-        btn_box.setSpacing(6)
-
-        min_btn = QPushButton("—")
-        min_btn.setFixedSize(26, 26)
-        min_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        min_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent;
-                color: {TEXT_SECONDARY};
-                border: none;
-                font-size: 10pt;
-                border-radius: 13px;
-            }}
-            QPushButton:hover {{
-                background: {BG_AI_BUBBLE};
-                color: {TEXT_PRIMARY};
-            }}
-        """)
-        min_btn.clicked.connect(self.minimize_requested.emit)
-
-        close_btn = QPushButton("✕")
-        close_btn.setFixedSize(26, 26)
-        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent;
-                color: {TEXT_SECONDARY};
-                border: none;
-                font-size: 9pt;
-                border-radius: 13px;
-            }}
-            QPushButton:hover {{
-                background: #2D1A22;
-                color: {ACCENT_RED};
-            }}
-        """)
-        close_btn.clicked.connect(self.close_requested.emit)
-
-        btn_box.addWidget(min_btn)
-        btn_box.addWidget(close_btn)
-
-        header_row.addWidget(self._logo_badge, alignment=Qt.AlignmentFlag.AlignVCenter)
-        header_row.addWidget(title_lbl, alignment=Qt.AlignmentFlag.AlignVCenter)
-        header_row.addStretch()
-        header_row.addLayout(btn_box)
-        main_vbox.addLayout(header_row)
-
-        # Divider line (smooth gradient)
-        divider = QFrame()
-        divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setFixedHeight(1)
-        divider.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 transparent, stop:0.2 rgba(120, 146, 255, 0.18), stop:0.8 rgba(120, 146, 255, 0.18), stop:1 transparent); border: none;")
-        main_vbox.addWidget(divider)
-
-        # ── 2. Conversation Area (Scrollable) ─────────────────────────────────
-        self._scroll = QScrollArea()
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self._scroll.setStyleSheet(f"""
-            QScrollArea {{
-                background: transparent;
-                border: none;
-            }}
-            QScrollBar:vertical {{
-                background: transparent;
-                width: 4px;
-                margin: 0px;
-                border-radius: 2px;
-            }}
-            QScrollBar::handle:vertical {{
-                background: rgba(120, 146, 255, 0.25);
-                min-height: 24px;
-                border-radius: 2px;
-            }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                height: 0px;
-            }}
-        """)
-
-        self._msg_container = QWidget()
-        self._msg_container.setStyleSheet("background: transparent;")
-        self._msg_vbox = QVBoxLayout(self._msg_container)
-        self._msg_vbox.setContentsMargins(0, 4, 0, 4)
-        self._msg_vbox.setSpacing(14)
-        self._msg_vbox.addStretch(1)  # Keeps messages pushed to the top
-
-        self._scroll.setWidget(self._msg_container)
-        main_vbox.addWidget(self._scroll, stretch=1)
-
-        # Connect scrollbar value change to toggle scroll down button
-        self._scroll.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
-
-        # ── Scroll Down Indicator Pill (as seen in reference) ─────────────────
-        scroll_btn_row = QHBoxLayout()
-        scroll_btn_row.setContentsMargins(0, 0, 0, 0)
-
-        self._scroll_down_btn = QPushButton("↓")
-        self._scroll_down_btn.setFixedSize(28, 28)
-        self._scroll_down_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._scroll_down_btn.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1E2536, stop:1 #161C28);
-                color: #9BAAC5;
-                border: 1px solid rgba(120, 146, 255, 0.18);
-                border-radius: 14px;
-                font-size: 11pt;
-                padding-bottom: 2px;
-            }
-            QPushButton:hover {
-                background: #252E42;
-                color: #E5E9F2;
-                border: 1px solid rgba(120, 146, 255, 0.35);
-            }
-        """)
-        self._scroll_down_btn.clicked.connect(self._scroll_to_bottom)
-
-        scroll_btn_row.addStretch()
-        scroll_btn_row.addWidget(self._scroll_down_btn)
-        scroll_btn_row.addStretch()
-        main_vbox.addLayout(scroll_btn_row)
-
-        # ── 3. Thinking Status Bubble (Static label + Animated Wave) ─────────
-        self._thinking_item = QWidget()
-        t_layout = QVBoxLayout(self._thinking_item)
-        t_layout.setContentsMargins(0, 0, 0, 0)
-        t_layout.setSpacing(4)
-
-        t_header = QLabel("KUGANE")
-        t_header.setFont(QFont(FONT_FAMILY_MONO, 9, QFont.Weight.Bold))
-        t_header.setStyleSheet(f"color: {ACCENT_BLUE}; letter-spacing: 0.5px; background: transparent; border: none;")
-
-        t_bubble = QFrame()
-        t_bubble.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1C2333, stop:1 #151A26);
-                border-radius: 14px;
-                border: 1px solid rgba(120, 146, 255, 0.18);
-            }
-        """)
-        tb_layout = QHBoxLayout(t_bubble)
-        tb_layout.setContentsMargins(16, 10, 16, 10)
-        tb_layout.setSpacing(10)
-
-        self._thinking_lbl = QLabel("Thinking")
-        self._thinking_lbl.setFont(QFont(FONT_FAMILY_MONO, 11, QFont.Weight.Bold))
-        self._thinking_lbl.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent; border: none;")
-
-        self._thinking_wave = WaveformWidget(ACCENT_BLUE)
-        self._thinking_wave.set_active(True)
-
-        tb_layout.addWidget(self._thinking_lbl)
-        tb_layout.addWidget(self._thinking_wave)
-
-        t_row = QHBoxLayout()
-        t_row.addWidget(t_bubble)
-        t_row.addStretch()
-
-        t_layout.addWidget(t_header)
-        t_layout.addLayout(t_row)
-        self._thinking_item.hide()
-        main_vbox.addWidget(self._thinking_item)
-
-        # ── 4. Bottom Message Composer (Pure Text, Animated Send) ─────────────
-        self._composer_frame = QFrame()
-        self._composer_frame.setFixedHeight(52)
-        self._composer_frame.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1E2536, stop:1 #151B27);
-                border: 1px solid rgba(120, 146, 255, 0.22);
-                border-radius: 26px;
-            }
-        """)
-        c_layout = QHBoxLayout(self._composer_frame)
-        c_layout.setContentsMargins(14, 6, 8, 6)
-        c_layout.setSpacing(8)
-
-        # Left prompt sparkle glyph
-        self._sparkle_icon = SparkleIconWidget(TEXT_SECONDARY, size=16)
-
-        # Center input field
-        self._input_field = QLineEdit()
-        self._input_field.setPlaceholderText("Ask Kugane anything...")
-        self._input_field.setFont(QFont(FONT_FAMILY_MONO, 10, QFont.Weight.Bold))
-        self._input_field.setStyleSheet(f"""
-            QLineEdit {{
-                background: transparent;
-                border: none;
-                color: {TEXT_PRIMARY};
-                selection-background-color: {BG_USER_BUBBLE};
-            }}
-        """)
-        self._input_field.returnPressed.connect(self._on_submit)
-        self._input_field.textChanged.connect(self._on_text_changed)
-
-        # Right send button: circular periwinkle blue with upward arrow
-        self._send_btn = QPushButton("↑")
-        self._send_btn.setFixedSize(36, 36)
-        self._send_btn.setFont(QFont(FONT_FAMILY_MONO, 13, QFont.Weight.Bold))
-        self._send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._send_btn.clicked.connect(self._on_submit)
-        self._update_send_button(active=False)
-
-        c_layout.addWidget(self._sparkle_icon)
-        c_layout.addWidget(self._input_field, stretch=1)
-        c_layout.addWidget(self._send_btn)
-
-        main_vbox.addWidget(self._composer_frame)
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        # Generous rounded rectangle for expanded panel with smooth gradient
-        grad = QLinearGradient(0, 0, 0, self.height())
-        grad.setColorAt(0.0, QColor(20, 23, 38))
-        grad.setColorAt(1.0, QColor(13, 16, 25))
-
-        p.setBrush(QBrush(grad))
-        p.setPen(QPen(QColor(120, 146, 255, 38), 1.0))
-        p.drawRoundedRect(0, 0, self.width(), self.height(), 24, 24)
-
-    def _on_text_changed(self, text: str):
-        is_active = bool(text.strip())
-        self._update_send_button(active=is_active)
-        self._sparkle_icon.set_color(ACCENT_BLUE if is_active else TEXT_SECONDARY)
-
-    def _update_send_button(self, active: bool):
-        if active:
-            self._send_btn.setEnabled(True)
-            self._send_btn.setStyleSheet("""
-                QPushButton {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #8EA5FF, stop:1 #6784FF);
-                    color: #FFFFFF;
-                    border: none;
-                    border-radius: 18px;
-                    padding-bottom: 2px;
-                }
-                QPushButton:hover {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #A1B4FF, stop:1 #7892FF);
-                }
-            """)
-        else:
-            self._send_btn.setEnabled(False)
-            self._send_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: #232B3B;
-                    color: {TEXT_MUTED};
-                    border: none;
-                    border-radius: 18px;
-                    padding-bottom: 2px;
-                }}
-            """)
-
-    def _on_submit(self):
-        text = self._input_field.text().strip()
-        if text:
-            self._input_field.clear()
-            self._update_send_button(active=False)
-            self.message_sent.emit(text)
-
-    def add_user_message(self, text: str):
-        item = UserMessageItem(text)
-        self._msg_vbox.insertWidget(self._msg_vbox.count() - 1, item)
-        self._scroll_to_bottom()
-
-    def add_assistant_message(self, text: str):
-        item = AssistantMessageItem(text)
-        self._msg_vbox.insertWidget(self._msg_vbox.count() - 1, item)
-        self._scroll_to_bottom()
-
-    def add_error_message(self, text: str):
-        item = AssistantMessageItem(f"⚠ {text}")
-        self._msg_vbox.insertWidget(self._msg_vbox.count() - 1, item)
-        self._scroll_to_bottom()
-
-    def set_thinking(self, thinking: bool):
-        self._thinking_item.setVisible(thinking)
-        self._input_field.setEnabled(not thinking)
-        self._send_btn.setEnabled(not thinking and bool(self._input_field.text().strip()))
-        if thinking:
-            self._thinking_wave.set_active(True)
-            self._scroll_to_bottom()
-        else:
-            self._thinking_wave.set_active(False)
-
-    def _on_scroll_changed(self, val: int):
-        # Auto-hide scroll button when already near the bottom
-        max_val = self._scroll.verticalScrollBar().maximum()
-        self._scroll_down_btn.setVisible(max_val > 50 and (max_val - val) > 30)
-
-    def _scroll_to_bottom(self):
-        QTimer.singleShot(60, lambda: self._scroll.verticalScrollBar().setValue(
-            self._scroll.verticalScrollBar().maximum()
-        ))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN DYNAMIC ISLAND WINDOW (Dual-Bubble: Compact Pill + Conversation Card)
-# ══════════════════════════════════════════════════════════════════════════════
 class DynamicIslandWindow(QWidget):
     """
-    Kugane Floating Window — Dual-Bubble Architecture:
-    - Compact pill capsule centered on top (narrower width).
-    - Conversation card drops below the pill with a visual gap.
-    - Smooth expand/collapse animation with physics easing.
-    - Configurable via config/ui_config.yaml for position, size, colors.
+    Kugane Floating Notch Window:
+    - Stuck to the top edge of the screen (top_y = 0) with concave top ears
+      and smooth bottom corners.
+    - Displays a balanced grayish perimeter backlight when hovered in either
+      compact or expanded mode.
+    - Supports free edge/corner resizing and fullscreen toggle on the open pill.
     """
 
     user_message_submitted: pyqtSignal = pyqtSignal(str)
+    user_message_with_files_submitted: pyqtSignal = pyqtSignal(str, list)
+    user_message_submitted_ex: pyqtSignal = pyqtSignal(str, list, bool)
 
-    # Dimensional anchors — loaded from YAML config
-    W_COMPACT  = _D.get("compact_width", 224)
-    H_COMPACT  = _D.get("compact_height", 40)
-    W_EXPANDED = _D.get("expanded_width", 480)
-    H_EXPANDED = _D.get("expanded_height", 520)
-    PILL_GAP   = _D.get("pill_gap", 7)
+    EAR_RADIUS = int(DIMENSIONS.get("ear_radius", 14))
+    COMPACT_BOT_RADIUS = int(DIMENSIONS.get("compact_bottom_radius", 18))
+    EXPANDED_BOT_RADIUS = int(DIMENSIONS.get("expanded_bottom_radius", 28))
+    MIN_W_EXPANDED = int(DIMENSIONS.get("min_expanded_width", 360))
+    MIN_H_EXPANDED = int(DIMENSIONS.get("min_expanded_height", 320))
+    RESIZE_MARGIN = 10
 
     def __init__(self, on_user_submit_callback: Optional[Callable[[str], None]] = None):
         super().__init__()
         self._submit_cb = on_user_submit_callback
         self._is_expanded = False
+        self._is_fullscreen = False
+        self._is_hovered = False
+        self._suppress_auto_collapse = False
         self._current_state = "idle"
         self._pending_request = False
+
         self._drag_pos: Optional[QPoint] = None
+        self._press_pos: Optional[QPoint] = None
+        self._drag_moved = False
+
+        self._resize_edges: str = ""
+        self._resize_start_pos: Optional[QPoint] = None
+        self._resize_start_geom: Optional[QRect] = None
+        self._pre_fullscreen_rect: Optional[QRect] = None
+
+        self.W_COMPACT, self.H_COMPACT = self._resolve_compact_size()
+        self.W_EXPANDED = int(DIMENSIONS.get("expanded_width", 480))
+        self.H_EXPANDED = int(DIMENSIONS.get("expanded_height", 520))
 
         self._init_window()
         self._build_views()
         self._setup_animation()
 
-        # Start in compact idle
+        if LOGO_PATH.exists():
+            self.setWindowIcon(QIcon(str(LOGO_PATH)))
+
         self.set_state("idle")
+
+    def _resolve_compact_size(self) -> tuple[int, int]:
+        """Compute logical pixel dimensions matching configured physical inches."""
+        screen = self.screen() or QApplication.primaryScreen()
+        fallback_w = int(DIMENSIONS.get("compact_width", 427))
+        fallback_h = int(DIMENSIONS.get("compact_height", 48))
+
+        w_in = DIMENSIONS.get("compact_width_inches")
+        h_in = DIMENSIONS.get("compact_height_inches")
+        if screen is None or w_in is None or h_in is None:
+            return fallback_w, fallback_h
+
+        dpr = max(screen.devicePixelRatio(), 1.0)
+        px_per_inch = screen.physicalDotsPerInch() / dpr
+        if not (40.0 <= px_per_inch <= 300.0):
+            px_per_inch = 96.0
+
+        w_px = max(210, min(700, int(round(float(w_in) * px_per_inch))))
+        h_px = max(38, min(120, int(round(float(h_in) * px_per_inch))))
+        return w_px, h_px
 
     def _init_window(self):
         self.setWindowFlags(
@@ -824,21 +127,21 @@ class DynamicIslandWindow(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, True)
+        self.setMouseTracking(True)
 
-        screen = self.screen().geometry()
-        # Resolve alignment from YAML config
-        align = _P.get("align_x", "center")
-        offset = _P.get("offset_x", 0)
+        screen = (self.screen() or QApplication.primaryScreen()).geometry()
+        align = POSITION.get("align_x", "center")
+        offset = int(POSITION.get("offset_x", 0))
         if align == "left":
-            self._cx = self.W_COMPACT // 2 + 20 + offset
+            self._cx = screen.left() + self.W_COMPACT // 2 + 20 + offset
         elif align == "right":
-            self._cx = screen.width() - self.W_COMPACT // 2 - 20 + offset
+            self._cx = screen.right() - self.W_COMPACT // 2 - 20 + offset
         else:
-            self._cx = screen.width() // 2 + offset
+            self._cx = screen.center().x() + offset
 
-        self._top_y = _P.get("top_y", 48)
+        self._top_y = int(POSITION.get("top_y", 0))
 
-        # Position initially at compact geometry
         self.setGeometry(
             self._cx - self.W_COMPACT // 2,
             self._top_y,
@@ -848,33 +151,96 @@ class DynamicIslandWindow(QWidget):
 
     def _build_views(self):
         self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(0, 0, 0, 0)
-        self._layout.setSpacing(self.PILL_GAP)
+        self._layout.setContentsMargins(self.EAR_RADIUS, 0, self.EAR_RADIUS, 0)
+        self._layout.setSpacing(0)
 
-        # ── 1. Top pill row (narrower, centered within wider window) ──────────
-        pill_row = QHBoxLayout()
-        pill_row.setContentsMargins(0, 0, 0, 0)
-        pill_row.addStretch()
+        self._compact_view = CompactCapsuleView(self)
+        self._compact_view.hover_changed.connect(self._on_hover_changed)
+        self._layout.addWidget(self._compact_view)
 
-        self._compact_view = CompactCapsuleView()
-        self._compact_view.setFixedSize(self.W_COMPACT, self.H_COMPACT)
-        self._compact_view.clicked.connect(self._expand)
-
-        pill_row.addWidget(self._compact_view)
-        pill_row.addStretch()
-        self._layout.addLayout(pill_row)
-
-        # ── 2. Conversation card (wider, appears below the pill) ──────────────
         self._conversation_card = ConversationCardView(self)
         self._conversation_card.close_requested.connect(self._quit_app)
         self._conversation_card.minimize_requested.connect(self._collapse)
+        self._conversation_card.fullscreen_requested.connect(self.toggle_fullscreen)
         self._conversation_card.message_sent.connect(self._submit)
+        self._conversation_card.file_dialog_state_changed.connect(self._on_file_dialog_state)
         self._conversation_card.hide()
+        self._layout.addWidget(self._conversation_card)
 
-        self._layout.addWidget(self._conversation_card, stretch=1)
-
-        # Alias for backward compatibility with external callers
         self._expanded_view = self._conversation_card
+
+    def _on_file_dialog_state(self, is_open: bool):
+        self._suppress_auto_collapse = is_open
+        if not is_open and self._is_expanded:
+            self.activateWindow()
+            self._expanded_view._input_field.setFocus()
+
+    def _on_hover_changed(self, hovered: bool):
+        self._is_hovered = hovered or self.underMouse()
+        self.update()
+
+    def enterEvent(self, event: QEnterEvent):
+        self._is_hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._is_hovered = False
+        if not self._resize_edges:
+            self.unsetCursor()
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = float(self.width())
+        h = float(self.height())
+        if w <= 2 or h <= 2:
+            return
+
+        screen_avail = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        if self._is_fullscreen and w >= screen_avail.width() - 4:
+            p.fillRect(self.rect(), parse_color(NOTCH_BG, "#000000"))
+            return
+
+        denom = max(1.0, float(self.H_EXPANDED - self.H_COMPACT))
+        t = max(0.0, min(1.0, (h - self.H_COMPACT) / denom))
+        bot_r = self.COMPACT_BOT_RADIUS + t * (self.EXPANDED_BOT_RADIUS - self.COMPACT_BOT_RADIUS)
+
+        fill_path, stroke_path = build_notch_paths(w, h, float(self.EAR_RADIUS), bot_r)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(parse_color(NOTCH_BG, "#000000")))
+        p.drawPath(fill_path)
+
+        # Balanced grayish perimeter backlight on BOTH compact and expanded windows
+        p.save()
+        p.setClipPath(fill_path)
+        if self._is_hovered:
+            hover_base = parse_color(NOTCH_BORDER_HOVER, "rgba(185, 188, 198, 0.56)")
+            r, g, b = hover_base.red(), hover_base.green(), hover_base.blue()
+            for width_px, alpha in ((9.0, 26), (5.0, 52), (2.5, 92)):
+                glow_col = QColor(r, g, b, alpha)
+                p.setPen(QPen(glow_col, width_px, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawPath(stroke_path)
+            p.setPen(QPen(hover_base, 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+            p.drawPath(stroke_path)
+        else:
+            border_color = parse_color(NOTCH_BORDER, "rgba(255, 255, 255, 0.14)")
+            pen = QPen(border_color, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(stroke_path)
+        p.restore()
+
+        if not self._is_expanded:
+            cx = w / 2.0
+            p.setPen(QPen(QColor(30, 44, 34, 180), 1.0))
+            p.setBrush(QBrush(QColor(14, 23, 18)))
+            p.drawEllipse(QRectF(cx - 2.5, 3.0, 5.0, 5.0))
 
     def _quit_app(self):
         """Shut down the Kugane desktop assistant completely."""
@@ -883,13 +249,19 @@ class DynamicIslandWindow(QWidget):
     def changeEvent(self, event: QEvent):
         """Auto-collapse when the user clicks away or focus leaves the widget."""
         if event.type() == QEvent.Type.ActivationChange:
-            if not self.isActiveWindow() and self._is_expanded and not (self._anim.state() == QPropertyAnimation.State.Running):
+            if (
+                not self.isActiveWindow()
+                and self._is_expanded
+                and not self._is_fullscreen
+                and not self._suppress_auto_collapse
+                and not (self._anim.state() == QPropertyAnimation.State.Running)
+            ):
                 self._collapse()
         super().changeEvent(event)
 
     def _setup_animation(self):
         self._anim = QPropertyAnimation(self, b"geometry")
-        self._anim.setDuration(220)
+        self._anim.setDuration(240)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._anim.finished.connect(self._on_anim_finished)
 
@@ -902,30 +274,26 @@ class DynamicIslandWindow(QWidget):
         )
 
     def _expanded_rect(self) -> QRect:
-        return QRect(
-            self._cx - self.W_EXPANDED // 2,
-            self._top_y,
-            self.W_EXPANDED,
-            self.H_EXPANDED,
-        )
+        screen = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        w = max(self.MIN_W_EXPANDED, min(self.W_EXPANDED, screen.width()))
+        h = max(self.MIN_H_EXPANDED, min(self.H_EXPANDED, screen.height()))
+        x = max(screen.left(), min(self._cx - w // 2, screen.right() - w + 1))
+        return QRect(x, self._top_y, w, h)
+
+    def _fullscreen_rect(self) -> QRect:
+        avail = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        return QRect(avail.left(), self._top_y, avail.width(), avail.bottom() - self._top_y + 1)
 
     # ── State Machine ─────────────────────────────────────────────────────────
 
     def set_state(self, state: str, detail: str = ""):
-        """
-        Supported states:
-          'idle'      -> Calm pill (● KUGANE |||)
-          'thinking'  -> Active animated pill / panel thinking bubble
-          'loading'   -> Amber pill (● Loading... |||)
-          'error'     -> Red pill / error bubble
-        """
         self._current_state = state
 
         if state == "idle":
             self._compact_view.set_idle_state()
             self._expanded_view.set_thinking(False)
         elif state == "thinking":
-            self._compact_view.set_thinking_state()
+            self._compact_view.set_thinking_state(detail or "Thinking...")
             self._expanded_view.set_thinking(True)
         elif state == "loading":
             self._compact_view.set_loading_state(detail or "Loading...")
@@ -935,7 +303,6 @@ class DynamicIslandWindow(QWidget):
             self._expanded_view.set_thinking(False)
 
     def update_status(self, message: str):
-        """Safe status update slot."""
         low = message.lower()
         if "loading" in low or "model" in low:
             self.set_state("loading", detail=message)
@@ -944,21 +311,20 @@ class DynamicIslandWindow(QWidget):
         else:
             self.set_state("idle")
 
-    # ── Expand / Collapse ─────────────────────────────────────────────────────
+    # ── Expand / Collapse / Fullscreen ────────────────────────────────────────
 
     def _expand(self):
         if self._is_expanded or self._anim.state() == QPropertyAnimation.State.Running:
             return
         self._is_expanded = True
 
-        # Switch visibility
         self._compact_view.hide()
         self._expanded_view.show()
 
-        # Animate geometry outward symmetrically from top center
+        target = self._fullscreen_rect() if self._is_fullscreen else self._expanded_rect()
         self._anim.stop()
         self._anim.setStartValue(self.geometry())
-        self._anim.setEndValue(self._expanded_rect())
+        self._anim.setEndValue(target)
         self._anim.start()
 
         self.activateWindow()
@@ -968,37 +334,79 @@ class DynamicIslandWindow(QWidget):
         if not self._is_expanded or self._anim.state() == QPropertyAnimation.State.Running:
             return
         self._is_expanded = False
+        if self._is_fullscreen:
+            self._is_fullscreen = False
+            self._layout.setContentsMargins(self.EAR_RADIUS, 0, self.EAR_RADIUS, 0)
+            self._expanded_view.set_fullscreen_active(False)
 
-        # Switch to compact view immediately so expanded view doesn't clamp collapse
         self._expanded_view.hide()
         self._compact_view.show()
 
-        # Animate geometry inward symmetrically toward top center
         self._anim.stop()
         self._anim.setStartValue(self.geometry())
         self._anim.setEndValue(self._compact_rect())
         self._anim.start()
 
+    def toggle_fullscreen(self):
+        """Toggle between normal/custom expanded size and fullscreen."""
+        if not self._is_expanded or self._anim.state() == QPropertyAnimation.State.Running:
+            return
+
+        if not self._is_fullscreen:
+            self._pre_fullscreen_rect = QRect(self.geometry())
+            self._is_fullscreen = True
+            self._layout.setContentsMargins(0, 0, 0, 0)
+            self._expanded_view.set_fullscreen_active(True)
+            target = self._fullscreen_rect()
+        else:
+            self._is_fullscreen = False
+            self._layout.setContentsMargins(self.EAR_RADIUS, 0, self.EAR_RADIUS, 0)
+            self._expanded_view.set_fullscreen_active(False)
+            target = self._pre_fullscreen_rect or self._expanded_rect()
+
+        self._anim.stop()
+        self._anim.setStartValue(self.geometry())
+        self._anim.setEndValue(target)
+        self._anim.start()
+        self.update()
+
     def _on_anim_finished(self):
         if not self._is_expanded:
             self.setGeometry(self._compact_rect())
+        elif self._is_fullscreen:
+            self.setGeometry(self._fullscreen_rect())
+        self.update()
 
     # ── Conversation Pipeline ─────────────────────────────────────────────────
 
-    def _submit(self, text: str):
-        if not text.strip() or self._pending_request:
+    def _submit(self, text: str, file_paths: list[str] | None = None, include_screen: bool = False):
+        files = [f for f in (file_paths or []) if f]
+        if (not text.strip() and not files and not include_screen) or self._pending_request:
             return
         self._pending_request = True
 
-        # Show user message in expanded view
         if not self._is_expanded:
             self._expand()
-        self._expanded_view.add_user_message(text)
+        self._expanded_view.clear_agent_steps()
+        display_text = text or ("[Live Screen Context]" if include_screen else "")
+        self._expanded_view.add_user_message(display_text, file_paths=files)
         self.set_state("thinking")
 
         if self._submit_cb:
             self._submit_cb(text)
-        self.user_message_submitted.emit(text)
+        if not files and not include_screen:
+            self.user_message_submitted.emit(text)
+        self.user_message_with_files_submitted.emit(text, files)
+        self.user_message_submitted_ex.emit(text, files, include_screen)
+
+    def on_agent_step(self, agent: str, title: str, detail: str, status: str):
+        """Update the live Agent Activity feed inside the expanded card."""
+        self._expanded_view.add_agent_step(agent, title, detail, status)
+
+    def on_agent_status(self, status_text: str):
+        """Update the compact notch status while multi-agent work runs."""
+        if self._current_state == "thinking":
+            self._compact_view.set_thinking_state(status_text)
 
     def on_llm_response(self, reply: str):
         self._pending_request = False
@@ -1011,12 +419,11 @@ class DynamicIslandWindow(QWidget):
         self.set_state("error", detail="Error")
 
     def display_transcription(self, text: str):
-        """Safe compatibility slot for any text input."""
         if not self._pending_request and text.strip():
             self._submit(text)
 
-    def add_user_message(self, text: str):
-        self._expanded_view.add_user_message(text)
+    def add_user_message(self, text: str, file_paths: list[str] | None = None):
+        self._expanded_view.add_user_message(text, file_paths=file_paths)
 
     def add_assistant_message(self, text: str):
         self._expanded_view.add_assistant_message(text)
@@ -1026,24 +433,141 @@ class DynamicIslandWindow(QWidget):
         self._expanded_view.add_error_message(text)
         self.set_state("error", detail="Error")
 
-    # ── Draggable Window Behavior ─────────────────────────────────────────────
+    # ── Resize Hit-Testing & Draggable Behavior ───────────────────────────────
+
+    def _detect_resize_edges(self, local_pos: QPoint) -> str:
+        if not self._is_expanded or self._is_fullscreen:
+            return ""
+        m = self.RESIZE_MARGIN
+        left = local_pos.x() <= m
+        right = local_pos.x() >= self.width() - m
+        bottom = local_pos.y() >= self.height() - m
+        if bottom and left:
+            return "bottom_left"
+        if bottom and right:
+            return "bottom_right"
+        if left:
+            return "left"
+        if right:
+            return "right"
+        if bottom:
+            return "bottom"
+        return ""
+
+    def _update_cursor_for_edges(self, edges: str) -> None:
+        if edges in ("left", "right"):
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif edges == "bottom":
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        elif edges == "bottom_left":
+            self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+        elif edges == "bottom_right":
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        else:
+            self.unsetCursor()
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            local_pos = event.position().toPoint()
+            edges = self._detect_resize_edges(local_pos)
+            if edges:
+                self._resize_edges = edges
+                self._resize_start_pos = event.globalPosition().toPoint()
+                self._resize_start_geom = QRect(self.geometry())
+                event.accept()
+                return
+
+            self._press_pos = event.globalPosition().toPoint()
+            self._drag_pos = self._press_pos - self.frameGeometry().topLeft()
+            self._drag_moved = False
+            event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent):
+        if self._resize_edges and (event.buttons() & Qt.MouseButton.LeftButton):
+            if self._resize_start_pos is None or self._resize_start_geom is None:
+                return
+            delta = event.globalPosition().toPoint() - self._resize_start_pos
+            g = QRect(self._resize_start_geom)
+            avail = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+
+            if "right" in self._resize_edges:
+                new_w = max(self.MIN_W_EXPANDED, min(avail.right() - g.left() + 1, g.width() + delta.x()))
+                g.setWidth(new_w)
+            if "left" in self._resize_edges:
+                max_left = g.right() - self.MIN_W_EXPANDED + 1
+                new_left = max(avail.left(), min(max_left, g.left() + delta.x()))
+                g.setLeft(new_left)
+            if "bottom" in self._resize_edges:
+                max_h = avail.bottom() - self._top_y + 1
+                new_h = max(self.MIN_H_EXPANDED, min(max_h, g.height() + delta.y()))
+                g.setHeight(new_h)
+
+            self.setGeometry(g)
+            self.W_EXPANDED = g.width()
+            self.H_EXPANDED = g.height()
+            self._cx = g.center().x()
+            event.accept()
+            return
+
         if event.buttons() == Qt.MouseButton.LeftButton and self._drag_pos is not None:
-            new_pos = event.globalPosition().toPoint() - self._drag_pos
-            self.move(new_pos)
-            self._cx = self.geometry().center().x()
-            self._top_y = self.geometry().top()
+            if self._is_fullscreen:
+                return
+            gpos = event.globalPosition().toPoint()
+            if self._press_pos is not None and (gpos - self._press_pos).manhattanLength() > 4:
+                self._drag_moved = True
+            if self._drag_moved:
+                new_pos = gpos - self._drag_pos
+                screen = (self.screen() or QApplication.primaryScreen()).geometry()
+                clamped_x = max(
+                    screen.left(), min(new_pos.x(), screen.right() - self.width() + 1)
+                )
+                self.move(clamped_x, self._top_y)
+                self._cx = self.geometry().center().x()
+            event.accept()
+            return
+
+        edges = self._detect_resize_edges(event.position().toPoint())
+        self._update_cursor_for_edges(edges)
+        super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
-        self._drag_pos = None
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._resize_edges:
+                self._resize_edges = ""
+                self._resize_start_pos = None
+                self._resize_start_geom = None
+                self._update_cursor_for_edges(self._detect_resize_edges(event.position().toPoint()))
+                event.accept()
+                return
+
+            was_dragged = self._drag_moved
+            self._drag_pos = None
+            self._press_pos = None
+            self._drag_moved = False
+            if not was_dragged and not self._is_expanded:
+                self._expand()
+            event.accept()
 
     def keyPressEvent(self, event: QKeyEvent):
-        if event.key() == Qt.Key.Key_Escape and self._is_expanded:
-            self._collapse()
-        else:
-            super().keyPressEvent(event)
+        key = event.key()
+        if key == Qt.Key.Key_Escape:
+            if self._is_fullscreen:
+                self.toggle_fullscreen()
+                return
+            if self._is_expanded:
+                self._collapse()
+                return
+        elif self._is_expanded:
+            if key == Qt.Key.Key_Down:
+                self._expanded_view.smooth_scroll_by(110)
+                return
+            if key == Qt.Key.Key_Up:
+                self._expanded_view.smooth_scroll_by(-110)
+                return
+            if key == Qt.Key.Key_PageDown:
+                self._expanded_view.smooth_scroll_by(320)
+                return
+            if key == Qt.Key.Key_PageUp:
+                self._expanded_view.smooth_scroll_by(-320)
+                return
+        super().keyPressEvent(event)

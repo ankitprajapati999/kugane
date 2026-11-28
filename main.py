@@ -3,25 +3,34 @@
 main.py — Kugane application entry point.
 
 Composition order:
-  1. Load environment / settings.
-  2. Initialise GeminiService (or surface a configuration error).
+  1. Load environment / settings (supports Gemini API or remote Flask VLM server).
+  2. Initialise LangChain MultiAgentOrchestrator (Vision, Blender, Unity/Unreal).
   3. Build PyQt6 application and Dynamic Island window.
-  4. Wire user submit → GeminiWorker → window.on_llm_response / on_llm_error.
+  4. Wire user submit → AgentWorker → live progress + response / error.
   5. Enter Qt event loop.
 """
 from __future__ import annotations
 
-import sys
 import logging
+import sys
+from pathlib import Path
 
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
 from config.settings import (
-    GEMINI_API_KEY, GEMINI_MODEL, KUGANE_SYSTEM_INSTRUCTION,
+    FLASK_VLM_API_KEY,
+    FLASK_VLM_TIMEOUT,
+    FLASK_VLM_URL,
+    GEMINI_API_KEY,
+    GEMINI_MODEL,
     HISTORY_MAX_TURNS,
+    KUGANE_SYSTEM_INSTRUCTION,
+    LLM_PROVIDER,
 )
-from core.llm.gemini_service import GeminiService, ConfigurationError
-from core.llm.gemini_worker import GeminiWorker
+from core.agents.orchestrator import MultiAgentOrchestrator
+from core.llm.gemini_worker import AgentWorker
+from core.llm.providers import ProviderConfigError
 from ui.island_window import DynamicIslandWindow
 
 logging.basicConfig(level=logging.WARNING)
@@ -31,66 +40,78 @@ log = logging.getLogger("kugane.main")
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Kugane")
+    # DynamicIslandWindow uses Qt.WindowType.Tool; keep app alive when dialogs close.
+    app.setQuitOnLastWindowClosed(False)
+    logo_path = Path(__file__).resolve().parent / "ui" / "Assets" / "Final Logo.png"
+    if logo_path.exists():
+        app.setWindowIcon(QIcon(str(logo_path)))
 
     # ── 1. Build UI first so it's visible immediately ─────────────────────────
     window = DynamicIslandWindow()
     window.show()
 
-    # ── 2. Initialise Gemini service ──────────────────────────────────────────
-    gemini: GeminiService | None = None
+    # ── 2. Initialise LangChain Multi-Agent Orchestrator ──────────────────────
+    orchestrator: MultiAgentOrchestrator | None = None
     try:
-        gemini = GeminiService(
+        orchestrator = MultiAgentOrchestrator(
+            provider=LLM_PROVIDER,
             api_key=GEMINI_API_KEY,
             model=GEMINI_MODEL,
+            flask_url=FLASK_VLM_URL,
+            flask_timeout=FLASK_VLM_TIMEOUT,
+            flask_api_key=FLASK_VLM_API_KEY,
             system_instruction=KUGANE_SYSTEM_INSTRUCTION,
             history_max_turns=HISTORY_MAX_TURNS,
         )
-    except ConfigurationError as exc:
+    except ProviderConfigError as exc:
         window.set_state("no_key")
         window.add_error_message(str(exc))
-        window._expand()          # auto-open so the user sees the error
-        log.error("Gemini config error: %s", exc)
-        # Don't exit — let the user at least see the error message in the UI
-    except Exception as exc:  # noqa: BLE001
-        window.set_state("error", detail="Gemini init failed")
-        window.add_error_message(f"Failed to initialise Gemini: {exc}")
         window._expand()
-        log.exception("Unexpected error initialising Gemini")
+        log.error("LLM provider config error: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        window.set_state("error", detail="Agent init failed")
+        window.add_error_message(f"Failed to initialise Kugane orchestrator: {exc}")
+        window._expand()
+        log.exception("Unexpected error initialising MultiAgentOrchestrator")
 
-    # ── 3. Active GeminiWorker instances (kept alive until finished) ──────────
-    _active_workers: list[GeminiWorker] = []
+    # ── 3. Active AgentWorker instances (kept alive until finished) ───────────
+    _active_workers: list[AgentWorker] = []
 
-    def _cleanup_worker(worker: GeminiWorker) -> None:
+    def _cleanup_worker(worker: AgentWorker) -> None:
         try:
             _active_workers.remove(worker)
         except ValueError:
             pass
 
-    def on_user_submit(text: str) -> None:
-        """
-        Called by the UI on user message submission.
-        Spawns a GeminiWorker QThread for the API call.
-        """
-        if gemini is None:
+    def on_user_submit(
+        text: str,
+        file_paths: list[str] | None = None,
+        include_screen: bool = False,
+    ) -> None:
+        if orchestrator is None:
             window.on_llm_error(
-                "Gemini is not configured.\n"
-                "Add GEMINI_API_KEY to your .env file and restart Kugane."
+                "LLM provider is not configured.\n"
+                "Set GEMINI_API_KEY (or LLM_PROVIDER=flask_vlm + FLASK_VLM_URL) in .env and restart Kugane."
             )
             return
 
-        worker = GeminiWorker(service=gemini, user_text=text)
+        worker = AgentWorker(
+            service=orchestrator,
+            user_text=text,
+            file_paths=file_paths,
+            include_screen=include_screen,
+        )
         _active_workers.append(worker)
 
-        worker.response_ready.connect(
-            lambda reply, w=worker: (window.on_llm_response(reply), _cleanup_worker(w))
-        )
-        worker.error_occurred.connect(
-            lambda msg, w=worker: (window.on_llm_error(msg), _cleanup_worker(w))
-        )
+        worker.step_updated.connect(window.on_agent_step)
+        worker.status_changed.connect(window.on_agent_status)
+        worker.response_ready.connect(window.on_llm_response)
+        worker.error_occurred.connect(window.on_llm_error)
+        worker.finished.connect(lambda w=worker: _cleanup_worker(w))
+        worker.finished.connect(worker.deleteLater)
         worker.start()
 
-    # Wire UI signal → Gemini pipeline
-    window.user_message_submitted.connect(on_user_submit)
+    window.user_message_submitted_ex.connect(on_user_submit)
 
     # ── 4. Event loop ─────────────────────────────────────────────────────────
     exit_code = app.exec()

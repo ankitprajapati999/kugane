@@ -6,8 +6,8 @@
 
 # Window Positioning
 position:
-  # Distance from the top edge of the screen (in pixels). Increase to move further down.
-  top_y: 48
+  # Distance from the top edge of the screen (0 = stuck flush to top bezel)
+  top_y: 0
   # Horizontal alignment: "center", "left", "right"
   align_x: "center"
   # Horizontal offset from alignment center (in pixels)
@@ -15,61 +15,63 @@ position:
 
 # Dimensions & Layout
 dimensions:
-  # Main compact pill dimensions
-  compact_width: 224
-  compact_height: 40
+  # Physical size targets for the compact notch (inches, converted via screen DPI)
+  compact_width_inches: 4.7
+  compact_height_inches: 0.525
 
-  # Expanded conversation card dimensions
+  # Fallback pixel dimensions if physical DPI is unavailable
+  compact_width: 427
+  compact_height: 48
+
+  # Expanded conversation panel dimensions
   expanded_width: 480
   expanded_height: 520
+  min_expanded_width: 360
+  min_expanded_height: 320
 
-  # Space between the main top pill and the conversation card (~5pt = 7px)
-  # Gives the floating dual-bubble appearance
-  pill_gap: 7
+  # Dynamic Island notch curve radii (pixels)
+  ear_radius: 14
+  compact_bottom_radius: 18
+  expanded_bottom_radius: 28
 
-# Visual Theme & Colors (Hex, rgb, or rgba)
+# Visual Theme & Colors (Pitch-Black Notch Theme)
 colors:
-  # Surface gradient for expanded conversation card
-  surface_top: "#141726"
-  surface_bottom: "#0D1019"
-  surface_border: "rgba(120, 146, 255, 0.16)"
+  # Pitch-black notch background & balanced grayish hover backlight
+  notch_bg: "#000000"
+  notch_border: "rgba(255, 255, 255, 0.14)"
+  notch_border_hover: "rgba(185, 188, 198, 0.56)"
 
-  # Compact pill capsule gradient
-  capsule_top: "#262E44"
-  capsule_bottom: "#181E2E"
-  capsule_hover_top: "#303B56"
-  capsule_hover_bottom: "#1F273C"
-  capsule_border: "rgba(120, 146, 255, 0.20)"
-  capsule_border_hover: "rgba(142, 165, 255, 0.35)"
+  # Message bubbles (pitch-black / dark graphite)
+  user_bubble_start: "#1B1B20"
+  user_bubble_end: "#141418"
+  user_bubble_border: "rgba(255, 212, 0, 0.25)"
 
-  # Message bubbles
-  user_bubble_start: "#314E85"
-  user_bubble_end: "#243860"
-  user_bubble_border: "rgba(120, 146, 255, 0.25)"
-
-  assistant_bubble_start: "#1C2333"
-  assistant_bubble_end: "#151A26"
-  assistant_bubble_border: "rgba(120, 146, 255, 0.15)"
+  assistant_bubble_start: "#0F0F12"
+  assistant_bubble_end: "#09090B"
+  assistant_bubble_border: "rgba(255, 255, 255, 0.10)"
 
   # Message input composer
-  composer_top: "#1E2536"
-  composer_bottom: "#151B27"
-  composer_border: "rgba(120, 146, 255, 0.22)"
+  composer_top: "#111115"
+  composer_bottom: "#0A0A0D"
+  composer_border: "rgba(255, 255, 255, 0.14)"
 
-  # Accents
-  accent_blue: "#7892FF"
-  accent_blue_hover: "#8EA5FF"
-  accent_green: "#58D6A0"
-  accent_amber: "#FFB300"
-  accent_red: "#FF4444"
+  # Accents (Kugane gold + status colors)
+  accent_primary: "#FFD400"
+  accent_primary_hover: "#FFE033"
+  accent_blue: "#FFD400"
+  accent_blue_hover: "#FFE033"
+  accent_green: "#32D74B"
+  accent_amber: "#FF9F0A"
+  accent_red: "#FF453A"
 
   # Typography colors
-  text_primary: "#E5E9F2"
-  text_secondary: "#9BAAC5"
-  text_muted: "#6B7B99"
+  text_primary: "#FFFFFF"
+  text_secondary: "#98989F"
+  text_muted: "#636369"
 
 # Typography
 fonts:
-  family: "JetBrainsMono Nerd Font"
-  bold: true
+  family: "Poppins"
+  fallback_family: "Outfit"
+  bold: false
 

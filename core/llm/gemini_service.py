@@ -16,7 +16,10 @@ Design contract:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Optional
+
+from core.media.file_processor import FileProcessor
 
 log = logging.getLogger(__name__)
 
@@ -102,30 +105,46 @@ class GeminiService:
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
-    def send(self, user_text: str) -> str:
+    def send(self, user_text: str, file_paths: list[str] | None = None) -> str:
         """
-        Send a user message, return the assistant reply as a plain string.
+        Send a user message (and optional attached files), returning the assistant reply.
 
-        Raises:
-            ConfigurationError: if the service was never properly initialised.
-            RuntimeError: for recoverable API errors (network, quota, etc.).
+        Attached files (PDFs, images, audio, video, docs, code) are converted via
+        FileProcessor and passed into the active Gemini Chat session so follow-up
+        turns continue referencing the uploaded media seamlessly.
         """
         if self._chat is None:
             raise ConfigurationError("GeminiService is not initialised.")
 
         user_text = user_text.strip()
-        if not user_text:
+        files = [f for f in (file_paths or []) if f]
+        if not user_text and not files:
             return ""
 
-        # Keep history within configured limit
         self._trim_history()
+        genai = _get_genai()
 
         try:
-            response = self._chat.send_message(user_text)
+            if files:
+                parts = [
+                    FileProcessor.to_gemini_part(fp, genai, self._client)
+                    for fp in files
+                ]
+                prompt = user_text or (
+                    "Please read and analyze the attached file(s), then summarize "
+                    "the key points and let me know what I can ask next."
+                )
+                parts.append(prompt)
+                response = self._chat.send_message(parts)
+            else:
+                response = self._chat.send_message(user_text)
+
             reply = response.text.strip()
 
-            # Store turn in local history mirror for context display
-            self._history.append({"role": "user", "text": user_text})
+            history_entry: dict = {"role": "user", "text": user_text}
+            if files:
+                history_entry["files"] = [Path(fp).name for fp in files]
+            self._history.append(history_entry)
             self._history.append({"role": "assistant", "text": reply})
 
             return reply
@@ -133,7 +152,6 @@ class GeminiService:
         except Exception as exc:
             err_msg = str(exc)
             log.error("Gemini API error: %s", err_msg)
-            # Wrap in RuntimeError so callers can display it without crashing
             raise RuntimeError(
                 f"Gemini request failed: {err_msg}"
             ) from exc
